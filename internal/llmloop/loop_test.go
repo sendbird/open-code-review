@@ -6,6 +6,7 @@ package llmloop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -182,6 +183,9 @@ func TestRunMainTask_TaskDoneFailed(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "task_done reported FAILED") {
 		t.Fatalf("expected task_done FAILED error, got %v", err)
+	}
+	if !errors.Is(err, ErrTaskFailed) {
+		t.Fatalf("task_done FAILED error must wrap ErrTaskFailed, got %v", err)
 	}
 	if completed {
 		t.Fatal("task_done FAILED must not complete RunMainTask")
@@ -748,9 +752,15 @@ func TestRunMainTask_GraceRoundSkippedWhenContextCancelled(t *testing.T) {
 	runner = NewRunner(deps)
 
 	msgs := []llm.Message{llm.NewTextMessage("user", "review")}
-	_, stop, _ := runner.RunMainTask(ctx, msgs, "main.go")
-	if stop != StopMaxRounds {
-		t.Fatalf("stop = %v, want StopMaxRounds", stop)
+	completed, stop, err := runner.RunMainTask(ctx, msgs, "main.go")
+	if completed {
+		t.Fatal("a cancelled run must never be recorded as completed")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("grace-round skip on cancellation must surface as context.Canceled, got: %v", err)
+	}
+	if stop != StopNone {
+		t.Fatalf("stop = %v, want StopNone (an error carries no stop cause)", stop)
 	}
 	// Grace round should have been skipped (only 1 LLM call total)
 	if cancelClient.calls != 1 {
