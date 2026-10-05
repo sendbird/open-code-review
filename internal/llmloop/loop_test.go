@@ -1031,6 +1031,37 @@ func TestRunMainTask_TokenBudgetStopsBeforeNextRound(t *testing.T) {
 	}
 }
 
+// TestRunMainTask_TokenBudgetGraceTaskDoneStaysIncomplete pins that only the
+// tool-request budget stop turns a grace-round task_done(DONE) into completion:
+// after a token-budget stop the item stays budget-stopped, so callers still
+// classify it as failed(budget) and surface the run-wide budget warning.
+func TestRunMainTask_TokenBudgetGraceTaskDoneStaysIncomplete(t *testing.T) {
+	client := &fakeClient{responses: []*llm.ChatResponse{
+		withUsage(fileReadToolCallResponse("call_1", `{"path":"main.go"}`), 600),
+		withUsage(fileReadToolCallResponse("call_2", `{"path":"main.go"}`), 600),
+		taskDoneResponse(),
+	}}
+	deps := newTestDeps(client)
+	deps.MaxTokensBudget = 1000
+	deps.MainToolDefs = []llm.ToolDef{
+		{Type: "function", Function: llm.FunctionDef{Name: "file_read", Description: "read"}},
+		{Type: "function", Function: llm.FunctionDef{Name: "task_done", Description: "done"}},
+	}
+	runner := NewRunner(deps)
+
+	msgs := []llm.Message{llm.NewTextMessage("user", "review")}
+	completed, stop, err := runner.RunMainTask(context.Background(), msgs, "main.go")
+	if err != nil {
+		t.Fatalf("RunMainTask: %v", err)
+	}
+	if completed || stop != StopTokenBudget {
+		t.Fatalf("got completed=%v stop=%v, want completed=false stop=StopTokenBudget", completed, stop)
+	}
+	if got := len(client.requests); got != 3 {
+		t.Fatalf("expected 3 LLM requests (2 rounds + grace), got %d", got)
+	}
+}
+
 // TestRunMainTask_ZeroTokenBudgetNeverStops guards the default: callers that
 // never set a budget keep the pre-existing round-only behaviour.
 func TestRunMainTask_ZeroTokenBudgetNeverStops(t *testing.T) {
