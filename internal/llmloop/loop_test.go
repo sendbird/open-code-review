@@ -6,6 +6,7 @@ package llmloop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -182,6 +183,9 @@ func TestRunMainTask_TaskDoneFailed(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "task_done reported FAILED") {
 		t.Fatalf("expected task_done FAILED error, got %v", err)
+	}
+	if !errors.Is(err, ErrTaskFailed) {
+		t.Fatalf("task_done FAILED error must wrap ErrTaskFailed, got %v", err)
 	}
 	if completed {
 		t.Fatal("task_done FAILED must not complete RunMainTask")
@@ -748,9 +752,15 @@ func TestRunMainTask_GraceRoundSkippedWhenContextCancelled(t *testing.T) {
 	runner = NewRunner(deps)
 
 	msgs := []llm.Message{llm.NewTextMessage("user", "review")}
-	_, stop, _ := runner.RunMainTask(ctx, msgs, "main.go")
-	if stop != StopMaxRounds {
-		t.Fatalf("stop = %v, want StopMaxRounds", stop)
+	completed, stop, err := runner.RunMainTask(ctx, msgs, "main.go")
+	if completed {
+		t.Fatal("a cancelled run must never be recorded as completed")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("grace-round skip on cancellation must surface as context.Canceled, got: %v", err)
+	}
+	if stop != StopNone {
+		t.Fatalf("stop = %v, want StopNone (an error carries no stop cause)", stop)
 	}
 	// Grace round should have been skipped (only 1 LLM call total)
 	if cancelClient.calls != 1 {
@@ -1018,6 +1028,37 @@ func TestRunMainTask_TokenBudgetStopsBeforeNextRound(t *testing.T) {
 	}
 	if runner.TotalTokensUsed() <= deps.MaxTokensBudget {
 		t.Fatalf("usage %d should exceed the budget %d after the stop", runner.TotalTokensUsed(), deps.MaxTokensBudget)
+	}
+}
+
+// TestRunMainTask_TokenBudgetGraceTaskDoneStaysIncomplete pins that only the
+// tool-request budget stop turns a grace-round task_done(DONE) into completion:
+// after a token-budget stop the item stays budget-stopped, so callers still
+// classify it as failed(budget) and surface the run-wide budget warning.
+func TestRunMainTask_TokenBudgetGraceTaskDoneStaysIncomplete(t *testing.T) {
+	client := &fakeClient{responses: []*llm.ChatResponse{
+		withUsage(fileReadToolCallResponse("call_1", `{"path":"main.go"}`), 600),
+		withUsage(fileReadToolCallResponse("call_2", `{"path":"main.go"}`), 600),
+		taskDoneResponse(),
+	}}
+	deps := newTestDeps(client)
+	deps.MaxTokensBudget = 1000
+	deps.MainToolDefs = []llm.ToolDef{
+		{Type: "function", Function: llm.FunctionDef{Name: "file_read", Description: "read"}},
+		{Type: "function", Function: llm.FunctionDef{Name: "task_done", Description: "done"}},
+	}
+	runner := NewRunner(deps)
+
+	msgs := []llm.Message{llm.NewTextMessage("user", "review")}
+	completed, stop, err := runner.RunMainTask(context.Background(), msgs, "main.go")
+	if err != nil {
+		t.Fatalf("RunMainTask: %v", err)
+	}
+	if completed || stop != StopTokenBudget {
+		t.Fatalf("got completed=%v stop=%v, want completed=false stop=StopTokenBudget", completed, stop)
+	}
+	if got := len(client.requests); got != 3 {
+		t.Fatalf("expected 3 LLM requests (2 rounds + grace), got %d", got)
 	}
 }
 
